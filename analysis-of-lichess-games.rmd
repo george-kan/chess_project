@@ -1,0 +1,802 @@
+---
+title: "Analysis of lichess games"
+output: 
+  html_document:
+    toc: true
+    code_folding: "hide"
+    theme: readable    
+---
+
+```{r, include=FALSE}
+library(data.table)
+library(lubridate)
+library(tidyverse)
+library(scales)
+library(RColorBrewer)
+library(tidyverse)
+install.packages("rchess")
+library(rchess)
+library(tidytext)
+library(gridExtra)
+library(htmltools)
+#library(CGPfunctions)
+library(ggrepel)
+library(ggthemes)
+library(ggpmisc)
+library(caret)
+library(knitr)
+library(DMwR)
+theme_set(theme_light())
+
+chess_data = readRDS("../input/lichess-september-2020-data/Sept_20_analysis.RDS")
+
+### Remove indecisive games
+chess_data = chess_data[Result != "*"]
+
+### Remove games from banned accounts
+chess_data = chess_data[BlackElo < 3200 & WhiteElo < 3200]
+
+### Remove abandoned games and rule violation games
+chess_data = chess_data[!Termination %in% c("Rules infraction", "Abandoned")]
+
+
+### Fix names
+chess_data[grepl("Ã", Opening), Opening := iconv(Opening, "UTF-8", "ISO-8859-1",sub='')]
+
+
+chess_data[, Black_elo_category := factor(Black_elo_category, levels = c("Low rating", "High rating", "GM rating"), ordered = T)]
+chess_data[, White_elo_category := factor(White_elo_category, levels = c("Low rating", "High rating", "GM rating"), ordered = T)]
+chess_data[,  Game_type := factor(Game_type, levels = c("Bullet", "Blitz", "Rapid", "Classical"), ordered = T)]
+chess_data[, Result := factor(Result, levels = c("0-1", "1/2-1/2", "1-0"))]
+
+chess_data[White_elo_category == Black_elo_category, `Match category`:= White_elo_category]
+chess_data[White_elo_category != Black_elo_category, `Match category`:= pmax(White_elo_category, Black_elo_category)]
+
+# Removing correspondence games
+chess_data = chess_data[Game_type != "Correspondence"]
+
+chess_data[, `Opening variation` := gsub("(.*?)(:|,).*", "\\1", Opening)]
+chess_data[, `Opening variation` := gsub("(.*),.*", "\\1", `Opening variation`)]
+
+chess_vis <- Chess$new()
+```
+
+
+
+## 1) The data
+Chess is my favorite game (ok probably tied with basketball - Go [Lakers](https://www.youtube.com/watch?v=kBsUzcb_dpI)) so I thought it is high time I did an analysis on it.
+The dataset was created by analysing the games for September 2020 in [the lichess game database](https://database.lichess.org/) during the lockdown.  
+It involved going through the games and creating variables that I thought would be interesting such as how many blunders the players made, or how good were the moves they made when they invested significant portion of their time. Only games that had an evaluation by lichess are included in the dataset.  
+For more information about the processing of the raw files, please have a look at [my github](https://github.com/george-kan/chess_project/blob/master/Lichess_game_parser.R)
+
+We will investigate some of these variables in this notebook.
+
+But first of all let's have a look at the games that we have in our disposal:
+
+
+```{r games by time control, echo = F}
+ggplot(chess_data[, .(Games = .N), by = .(Game_type, `Match category`)], aes(x = Game_type, y = Games, fill = `Match category`)) +
+   geom_col() +
+   scale_y_continuous(label = comma, expand = c(0.01, 0.01)) +
+   scale_fill_brewer(palette = "Set2") +
+   labs(title = "Games by time control") +
+   theme(axis.title.x = element_blank(),
+         panel.grid.major = element_blank(),
+         panel.grid.minor = element_blank())
+
+```
+
+We have roughly 3.7 million games in our dataset, the majority of which are Blitz games. The GM rated games are very few in comparison to the other categories but we will try to analyse the data as percentage of the totals in order to be able to compare across rating categories.
+
+## 2) The openings
+
+### 2.1) Most popular openings by rating
+
+An interesting question is whether the openings chosen by higher rated players differ significantly to the ones chosen by us lesser
+mortals. 
+
+We kick things off with an easy analysis where we just have a look at the most popular openings broken down by rating:
+
+
+```{r openings by rating, fig.height = 8}
+
+games_by_opening = chess_data[, .(Games = .N), by = .(`Opening variation`, `Match category`)]
+games_by_opening[, Total_category_games := sum(Games), by = `Match category`]
+games_by_opening[, `Percentage of total games` := Games / Total_category_games]
+
+sorted = games_by_opening[order(-Games)][, head(.SD, 10), by = .(`Match category`)]
+
+sorted[, `Opening variation` := str_wrap(`Opening variation`, width = 45)]
+sorted[, `Opening variation` := reorder_within(`Opening variation`, `Percentage of total games`, `Match category`)]
+
+ggplot(sorted, aes(x = `Opening variation`, y = `Percentage of total games`)) +
+  geom_col(fill = "darkcyan") +
+  coord_flip() +
+  scale_y_continuous(label = percent, expand = expansion(mult = 0.01)) +
+  scale_x_reordered(expand=c(-1, 0)) +
+  facet_wrap(`Match category` ~ ., scales = "free_y", nrow = 3, ncol = 1) +
+  labs(title = "Most popular openings by rating", x = NULL) +
+  theme(strip.text = element_text(color = "black"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())
+
+```
+
+#### The Sicilian rules!
+
+The results are in, **Long live the Sicilian!**  
+Clearly the most popular opening to play as black in all 3 of our rating levels.  
+For those of you who are not following chess very closely, the Sicilian Defense is the most popular defense against 1.e4 by White. For a more visual representation, these are the starting moves for both players:
+
+```{r Sicilian, echo=F}
+sic_fen = "rnbqkbnr/pp1ppppp/8/2p5/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2"
+temp = chess_vis$load(sic_fen)
+plot(chess_vis)
+
+```
+The reason why this defense is so popular at all levels is that it offers significant winning chances to the player with the black pieces. That being said, in chess you get something, you give something and therefore there is greater risk of losing too. 
+
+#### 1.e4 is seen more often at lower levels
+
+One visible trend from our data is that the higher the rating, the less often the players start with 1.e4.  
+1.e4 is the starting move suggested to all beginners and it makes sense; it stakes a claim in the center and opens up the diagonal for both the bishop and the queen. 
+
+```{r e4, echo=F}
+e4_fen = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 1"
+temp = chess_vis$load(e4_fen)
+plot(chess_vis)
+
+```
+
+Out of the 10 most popular openings for low rated players, 8 start with 1.e4 (the two exceptions are the Queen's Pawn Game and the English Opening).  
+For higher rated players this number drops to 6 (Indian Game and Queen's Gambit Declined are added to the exception list) and for GM rating it drops to 5 (Zukertort Opening and King's Indian Defense being the last ones added to the list)
+
+### Uncommon openings at the low rating level
+
+While the 3 lists have many similarities between them, there are two openings which are most popular in lower rated games:  
+1. King's Pawn Game  
+2. Philidor Defense
+
+Let's have a look at them.
+
+**King's Pawn Game**
+
+As the name suggests, this category includes games that involve moving the King's Pawn (e2 pawn for White). But the games that are allocated here are the ones that have unusual opening moves. Many of the most common openings in our lists involve the King's Pawn for White (Sicilian, Scandinavian, Ruy Lopez, Italian etc.) but this category only includes rare continuations. Let's see two examples:
+
+
+```{r KPG, echo = F}
+kpg_fen1 = "rnbqkbnr/pppp1ppp/8/4p2Q/4P3/8/PPPP1PPP/RNB1KBNR w KQkq - 1 2"
+temp = chess_vis$load(kpg_fen1)
+p1 = plot(chess_vis)
+
+kpg_fen2 = "rnbqkbnr/pppp1ppp/8/4p3/4P3/3P4/PPP2PPP/RNBQKBNR w KQkq - 1 2"
+temp = chess_vis$load(kpg_fen2)
+p2 = plot(chess_vis)
+
+browsable(
+  tagList(list(
+    tags$div(
+      style = 'width:50%;display:block;float:left;',
+      p1
+    ),
+    tags$div(
+      style = 'width:50%;display:block;float:left;',
+      p2
+    )
+  ))
+)
+```
+
+Both very unusual choices by White, with clear drawbacks:  
+In the first example, the Queen is about to going to get hit after 2...Nc6 and then 3...Nf6. It is a good general principle to try to develop the other pieces before developing the Queen.  
+In the second example, the d3 move blocks the bishop on f1 and overprotects the e4 that was not threatened by anything. White could do better by developing a piece (either knight or bishop).
+
+
+**Philidor Defense**
+
+The Philidor Defense is one of the oldest defenses against 1.e4. It is a very solid defense and it is still used when players are trying to 
+avoid very theoretical lines in the Spanish or the Italian Game. Rarely seen at the top level but even the world champion plays it sometimes: [Caruana Carlsen 2011](https://www.chessgames.com/perl/chessgame?gid=1628882)
+
+
+```{r Phil, echo=F}
+phil_fen = "rnbqkbnr/ppp2ppp/3p4/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R w KQkq - 2 3"
+temp = chess_vis$load(phil_fen)
+plot(chess_vis)
+
+```
+
+### 2.2) Which openings show the biggest change in popularity between ratings?
+
+This is a similar question to the one before but there are some differences. This analysis would allow us to track how much the popularity of an opening changes accross rating categories. In the previous chart, this was only possible for the openings that were in the top 10 for all 3 rating categories. 
+
+*A note on methodology:* I calculated the change for each opening as the maximum percentage point difference across rating categories. So for example, if opening X was seen in 3% of the low rated games, 5% of the high rated games and 4% of the GM rated games, I would consider the change for this opening to be 2 percentage points: 5-3.
+
+```{r pop_change}
+change_data = games_by_opening[, .(`Opening variation`, `Match category`, `Percentage of total games`)]
+change_data[, `Percentage of total games` := 100*round(`Percentage of total games`, 3)] 
+change_data[, maximum_change := abs(max(`Percentage of total games`, na.rm = T) - min(`Percentage of total games`)), by = .(`Opening variation`)]
+max_change_openings = unique(change_data[, .(`Opening variation`, maximum_change)])[order(-maximum_change)]$`Opening variation`[1:8]
+change_data_top = change_data[`Opening variation` %in% max_change_openings, .(`Opening variation`, `Match category`, `Percentage of total games`)]
+change_data_top[, change:= `Percentage of total games`[`Match category` == "Low rating"] - `Percentage of total games`[`Match category` == "GM rating"], by = .(`Opening variation`)]
+
+## The following chart was made by modifying the wonderful newggslopeograph function: https://github.com/ibecav/CGPfunctions/blob/master/R/newggslopegraph.R
+
+custom_theme = list(  
+  scale_x_discrete(position = "top"),
+  scale_color_gradient2(low  = "forestgreen", mid = "white", high = "red"),
+  theme_wsj(),
+  theme(legend.position = "none"),
+  theme(panel.border     = element_blank()),
+  theme(axis.title.y     = element_blank()),
+  theme(axis.text.y      = element_blank()),
+  theme(panel.grid.major.y = element_blank()),
+  theme(panel.grid.minor.y = element_blank()),
+  theme(axis.title.x     = element_blank()),
+  theme(panel.grid.major.x = element_blank()),
+  theme(axis.text.x.top      = element_text(size=10)),
+  theme(axis.ticks       = element_blank()),
+  theme(plot.title       = element_text(size=14)),
+  theme(plot.subtitle    = element_text(size = 10)),
+  expand_limits(x = c(0, 4))
+)
+
+ggplot(change_data_top, aes(x = `Match category`, y = `Percentage of total games`, group = `Opening variation`)) +
+  geom_line(aes(color = change, alpha = 1), size = 1) +
+  geom_text_repel(data = change_data_top[`Match category` == "Low rating"], 
+                  aes(label = `Opening variation`) , 
+                  hjust = "left",
+                  box.padding = 0,
+                  segment.color = "gray",
+                  segment.alpha = 0.6,
+                  #fontface = "bold",
+                  size = 3,
+                  nudge_x = -1,
+                  direction = "y") +
+  geom_text_repel(data = change_data_top[`Match category` == "GM rating"], 
+                  aes(label = `Opening variation`) , 
+                  hjust = "right",
+                  box.padding = 0,
+                  segment.color = "gray",
+                  segment.alpha = 0.6,
+                  #fontface = "bold",
+                  size = 3,
+                  nudge_x = 1,
+                  direction = "y") +
+  geom_text_repel(aes(label = `Percentage of total games`), 
+             size = 2.5,
+             direction = "y") +
+  custom_theme +
+  labs(
+    title = str_wrap("Openings with the biggest change in popularity accross rating categories", 60)
+  )
+```
+
+### Biggest winners
+
+**Always number 1: Sicilian Defense**
+
+The **Sicilian Defense** is on a whole different scale compared to the other openings! Even though it is the most popular opening across all rating categories, it also shows the biggest increase as ratings go up! 
+The Sicilian goes from being seen in 12% of the low rated games to 17% in the high rated and to 16% of the GM rated games. 
+Simply crazy!
+
+**Consistently popular: English Opening, Caro-Kann Defense**
+
+These two openings are consistently popular across all the rating categories but they get even more popular as the rating goes up.  
+The **English** stakes a claim in the center by controlling the d5 square and can transpose to more traditional openings after moves like d4 and Nc3 by white. It requires some experience to play it as it does not help so much in piece development unlike 1.d4 and 1.e4  
+One of the most famous games that started out as an English (later transposed to a Queen's Gambit Declined) was [game 6](https://en.wikipedia.org/wiki/World_Chess_Championship_1972#Game_6:_Fischer%E2%80%93Spassky,_1%E2%80%930_(QGD_Tartakower)) of the world chess championship between Fisher and Spassky. It was a big surprise for Spassky to see 1.c4 on the board from Fisher, a passionate supporter of 1.e4.
+
+The **Caro-Kann** is a very respectable and solid opening for Black. It offers security but less counterattacking chances than the Sicilian or the French. It has been employed by many top level players most notably world champions Vasily Smyslov and Anatoly Karpov.
+By far the most famous Caro-Kann game was the [final game](https://en.wikipedia.org/wiki/Deep_Blue_versus_Kasparov,_1997,_Game_6) of the chess match between Garry Kasparov and Deep Blue when Kasparov made a bad move in the opening (blunder) which was punished by Deep Blue and that's when we all realised that machines would soon take over the world. 
+
+
+```{r English-CK, echo=F}
+eng_fen = "rnbqkbnr/pppppppp/8/8/2P5/8/PP1PPPPP/RNBQKBNR w KQkq - 0 1"
+temp = chess_vis$load(eng_fen)
+p1 = plot(chess_vis)
+
+ck_fen = "rnbqkbnr/pp1ppppp/2p5/8/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2"
+temp = chess_vis$load(ck_fen)
+p2 = plot(chess_vis)
+
+browsable(
+  tagList(list(
+    tags$div(
+      style = 'width:50%;display:block;float:left;',
+      p1
+    ),
+    tags$div(
+      style = 'width:50%;display:block;float:left;',
+      p2
+    )
+  ))
+)
+
+```
+
+**Rising fast: King's Indian Defense**
+
+The **King's Indian Defense** is one of the most fascinating openings in chess. It is a hypermodern opening where Black allows White to claim control in the center in the hopes of challenging that center afterwards.  
+Just look at the second chart below, White has pawns on c4, d4, e4, f4 and has developed the knight and the bishop, this must surely be winning for White! (This variation is called the "Four pawns attack" but is actually less threatening than it looks) But no, Black can counterattack and achieve great results with this opening. 
+
+It was favored by chess world champions famous for their (counter)attacking style and their strive to create imbalances in the position so that they could play for a win with Black: Garry Kasparov, Bobby Fischer and Mikhail Tal.
+
+```{r kid, echo = F}
+kid_fen = "rnbqkb1r/pppppp1p/5np1/8/2PP4/8/PP2PPPP/RNBQKBNR w KQkq - 1 1"
+temp = chess_vis$load(kid_fen)
+p1 = plot(chess_vis)
+
+kid_fen2 = "rnbq1rk1/ppp1ppbp/3p1np1/8/2PPPP2/2N5/PP2B1PP/R1BQK1NR w KQ - 1 1"
+temp = chess_vis$load(kid_fen2)
+p2 = plot(chess_vis)
+
+browsable(
+  tagList(list(
+    tags$div(
+      style = 'width:50%;display:block;float:left;',
+      p1
+    ),
+    tags$div(
+      style = 'width:50%;display:block;float:left;',
+      p2
+    )
+  ))
+)
+```
+
+### Biggest losers
+
+**Straight to the bottom: King's Pawn Game**
+
+Not very surprisingly, the **King's Pawn Game** drops significantly in popularity across rating categories. This is to be expected as the more experienced players tend to chose either different starting moves (1.d4, 1.c4, 1.Nf3) or they go into more traditional paths when playing 1.e4 such as the Ruy Lopez, the Italian, the French etc.
+
+
+### 2.3) Which are the most successful openings for each color? 
+
+We have a big enough sample in order to have a look at the winning percentage of each color broken down by opening. Generally in chess White has the advantage of the first move which Black tries to fight against. These are very general considerations though and especially in short time controls anything can happen.
+For this analysis I excluded openings that appear in less than 50,000 games to avoid cases of really small sample size. 
+
+
+```{r results by opening, fig.height = 9}
+res_by_opening = chess_data[, .(Games = .N), by = .(Result, `Opening variation`)]
+res_by_opening = res_by_opening[, Total_games := sum(Games, na.rm = T), by = .(`Opening variation`)]
+res_by_opening[, `Games percent` := Games / Total_games]
+res_by_opening = res_by_opening[Total_games > 50000][order(-`Games percent`)]
+res_by_opening[, `Opening variation` := str_wrap(`Opening variation`, width = 20)]
+best_for_white = res_by_opening[`Opening variation` %in% res_by_opening[Result == "1-0", head(`Opening variation`, 10)], ][, white_percent := `Games percent`[Result == "1-0"], by = .(`Opening variation`)]
+best_for_black = res_by_opening[`Opening variation` %in% res_by_opening[Result == "0-1", head(`Opening variation`, 10)], ][, black_percent := `Games percent`[Result == "0-1"], by = .(`Opening variation`)]
+#drawish_openings = res_by_opening[`Opening variation` %in% res_by_opening[Result == "1/2-1/2", head(`Opening variation`, 10)], ][, draw_percent := `Games percent`[Result == "1/2-1/2"], by = .(`Opening variation`)]
+
+
+openings_plot <- function(dataset, order_column, title) {
+  ggplot(dataset, aes(x = reorder(`Opening variation`, get(order_column, dataset)), y = `Games percent`, fill = Result)) +
+  geom_col(color = "black") +
+  geom_hline(yintercept = 0.5, size = 1, color = "purple", linetype = "dashed") +
+  coord_flip() + 
+  scale_y_continuous(labels = percent, expand = expansion(mult = 0.01)) +
+  scale_fill_manual(values = c("black", "grey", "white"), labels = c("Black wins", "Draw", "White wins")) +
+  #guides(fill = guide_legend(reverse = T)) +
+  guides(fill = F) +
+  labs(title = title) +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        panel.background = element_blank(), 
+        axis.title = element_blank()) 
+}
+
+p1 = openings_plot(best_for_white, "white_percent", "Most successful openings for White")
+p2 = openings_plot(best_for_black, "black_percent", "Most successful openings for Black") +
+      guides(fill = guide_legend(reverse = T)) +
+       theme(legend.position = "bottom")
+       
+grid.arrange(p1, p2, nrow = 2)
+```
+
+## 3) The players (and their moves)
+
+For every game (as mentioned in paragraph 1) we have information about the moves made by the players such as: 
+
+1. How often did the balance in the game flip (based on changes in the evaluation of the game)
+2. How many blunders, errors and inaccuracies in the game by each player (annotated by "??"/"?"/"?!" respectively in the lichess pgn)  
+3. How many moves were made under time pressure (remaining time less than 10% of the starting time)  
+
+
+
+### 3.1) How often do games flip?
+
+Having access to the game evaluation allows for the calculation of how often does the balance of a game go from one side to another.  
+In particular, we can identify how often the status of a game switches between any of the following categories:  
+
+* The game is about equal - evaluation between -1 and 1  
+* White is winning - evaluation above 1   
+* Black is winning - evaluation below -1  
+
+**A crucial point to note here:** The fact that the evaluation indicates that one side or the other is winning does not necessarily mean that this will be reflected in the outcome of the game. The player has to find the (potentially just one) crucial move to tilt the game!
+
+I narrowed down the sample to games where the game balance changes up to 20 times because otherwise the plots become very difficult to read.
+
+```{r game_flips}
+flip_data = chess_data[Game_flips <= 20, .(Game_flips, Game_type, `Match category`)]
+
+ggplot(flip_data, aes(x = `Match category`, y = Game_flips, fill = `Match category`)) +
+  geom_boxplot() +
+  coord_flip() +
+  facet_wrap(Game_type ~ .) +
+  scale_fill_manual(values = c("lightsalmon", "darkslategray1", "gold")) +
+  labs(title = "Times the balance of a game changes by rating and time control", x = NULL, y = NULL) +
+  theme(strip.text = element_text(color = "black"),
+        strip.background =element_rect(fill="white"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        legend.position = "none")
+
+
+```
+
+There are some interesting points in the plot:
+
+* For bullet time controls the median number of times a game flips is almost the same across all 3 rating levels.  
+* The difference between ratings becomes more obvious in longer time controls where the GM rated games flip very few times.  
+* Low rated games flip about the same number of times on average regardless of the time control.  
+
+
+
+### 3.2) What is the relationship between ELO rating and inaccurate moves?
+
+### Blunders
+
+For the next two parts of the analysis I will introduce an extra category in the Elo rating groups "Below 1000 rating" because there are some really interesting patterns to be found in this category.  
+
+The first question that I had was whether having greater ELO rating results in less blunders in the game (hopefully the answer should be yes but let's check!)
+In order to perform a fair comparison, we will look into blunders per move to take into account the length of the game.
+
+
+```{r per_move_bl_agg}
+create_label <- function(formula, y_label, x_label) {
+  formula = gsub("y", y_label, formula)
+  formula = gsub("x", x_label, formula)
+}
+
+elo_blund_data = rbind(chess_data[, .(Elo = WhiteElo, Game_type, Blunders = White_blunders, Moves = Total_moves%/%2 + Total_moves%%2)], chess_data[, .(Elo = BlackElo, Game_type, Blunders = Black_blunders, Moves = Total_moves%/%2)])
+
+
+elo_blund_data[Elo <= 1000, `Elo level` := "Below 1000 rating"]
+elo_blund_data[between(Elo, 1000, 1900), `Elo level` := "Low rating"]
+elo_blund_data[between(Elo, 1901, 2400), `Elo level` := "High rating"]
+elo_blund_data[Elo >= 2401, `Elo level` := "GM rating"]
+elo_blund_data[, `Elo level` := factor(`Elo level`, levels = c("Below 1000 rating", "Low rating", "High rating", "GM rating"), ordered = T)]
+
+elo_blund_data[, `Blunders per move`:= Blunders / Moves]
+
+elo_blund_data_agg = elo_blund_data[, .(`Blunders per move` = mean(`Blunders per move`, na.rm=T)), by =.(`Elo level`, Game_type)]
+
+ggplot(elo_blund_data_agg, aes(x = `Elo level`, y = `Blunders per move`, fill = `Elo level`)) +
+    geom_col( width = 0.7) +
+    scale_fill_manual(guide = F, values = rev(c("gold", "darkslategray1", "lightsalmon", "plum2"))) +
+    facet_wrap(Game_type ~ .) + 
+    scale_y_continuous(expand = expansion(mult = 0.01)) +
+    coord_flip() +
+    labs(title = "Average blunders per move by rating and time control", y = NULL, x=NULL) +
+    theme(strip.text = element_text(color = "black"),
+          strip.background =element_rect(fill="white"),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank()) 
+
+```
+
+There are some clear patterns in the chart:  
+
+ * Blunders per move significantly decrease the higher the rating level (GM rated players make the fewest blunders) and the longer the time control.  
+ * Higher rated players take advantage of the available time and reduce the number of blunders compared to faster time controls.
+
+This is a great start but we can have a more granular look at how Elo rating correlates with blunders. 
+
+
+```{r per_move_bl}
+
+
+## Taking samples to make the plotting faster
+set.seed(1)
+elo_blund_data = rbind(elo_blund_data[Elo <= 1900][sample(.N, 100000)],
+                       elo_blund_data[between(Elo, 1901, 2400)][sample(.N, 100000)],
+                       elo_blund_data[Elo > 2400])
+
+
+
+ggplot(elo_blund_data, aes(x = Elo, y = `Blunders per move`)) +
+  geom_point(color = "grey") +
+  geom_smooth(color = "green", method = "lm", formula = y ~ x) +
+  stat_poly_eq(formula = y ~ x, 
+               aes(label = create_label(..eq.label.., "Bl.p.m", "Elo")), 
+               parse = T) +
+  facet_wrap(Game_type ~ . , nrow = 3) + 
+  labs(title = "Blunders per move by Elo level and time control", y = NULL) +
+  theme(strip.text = element_text(color = "black"),
+        strip.background =element_rect(fill="white"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())
+```
+
+We can definitely see a negative trend between Blunders per move and Elo rating, either but just looking at the slope of the lines or via the coefficients of the linear regression line at the top of the charts. The steepest slope can be seen for the Classical games.
+
+
+### What about lesser mistakes?
+
+While blunders are the most serious mistakes you can make in a game they are not the only ones. Based on the lichess annotation of the games, we have blunders (most serious mistakes), errors (serious mistakes) and inaccuracies. 
+The dataset contains a figure for all 3 types of moves which I called inferior moves (it is the sum of blunders, errors and inaccuracies by each player in the game). Let's see how these correlate with the Elo rating of the players.
+
+```{r per_move_inf}
+elo_inf_data = rbind(chess_data[, .(Elo = WhiteElo, Game_type, `Inferior moves` = White_inferior_moves, Moves = Total_moves%/%2 + Total_moves%%2)], chess_data[, .(Elo = BlackElo, Game_type, `Inferior moves` = White_inferior_moves, Moves = Total_moves%/%2)])
+elo_inf_data[, `Inferior choices per move`:= `Inferior moves` / Moves]
+set.seed(1)
+elo_inf_data = rbind(elo_inf_data[Elo <= 1900][sample(.N, 100000)],
+                       elo_inf_data[between(Elo, 1901, 2400)][sample(.N, 100000)],
+                       elo_inf_data[Elo > 2400])
+
+ggplot(elo_inf_data, aes(x = Elo, y = `Inferior choices per move`)) +
+  geom_point(color = "grey") +
+  geom_smooth(color = "green", method = "lm", formula = y ~ x) +
+  stat_poly_eq(formula = y ~ x, 
+               aes(label = create_label(..eq.label.., "Inf.p.m.", "Elo")), 
+               parse = T) +
+  facet_wrap(Game_type ~ . , nrow = 3) + 
+  labs(title = "Inferior choices per move by Elo level and time control", x = NULL, y = NULL) +
+  theme(strip.text = element_text(color = "black"),
+        strip.background =element_rect(fill="white"),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())
+
+
+```
+
+The differences are more pronounced in this type of analysis. For every type of rating the slope is steeper than the corresponding one for just blunders. This is a good indication that there is definitely an inverse relationship between inferior move selection and Elo rating (thank God!).
+
+
+### 3.3) How does time pressure affect the move quality?
+
+Time is a crucial part of chess. The game is essentially an optimisation problem where you have to find the best moves given the amount of time you have. The **objectively** best moves are ideal but not very practical if you have to spend half of your available time to find them. This aspect of the game is even more pronounced in faster time controls where players have to move their pieces as fast as possible. 
+
+One question that might be interesting to look at is whether players tend to make more bad moves in timescramble compared to normally. For this analysis I will restrict the bad moves to either blunders or mistakes and I will compare only games where one or both players played moves with little time left on the clock.
+
+
+
+```{r ts_analysis, warning = FALSE}
+little_time = rbind(chess_data[White_ts_moves > 0, .(Elo = WhiteElo, Game_type, `Bad moves` = White_blunders + White_mistakes, Moves = Total_moves%/%2 + Total_moves%%2, `Bad moves with low time` = White_ts_blunders + White_ts_mistake, `Moves with low time` = White_ts_moves)], 
+                    chess_data[Black_ts_moves > 0, .(Elo = BlackElo, Game_type, `Bad moves` = Black_blunders + Black_mistakes, Moves = Total_moves%/%2, `Bad moves with low time` = Black_ts_blunders + Black_ts_mistakes, `Moves with low time` = Black_ts_moves)])
+
+little_time[Elo <= 1000, `Elo level` := "Below 1000 rating"]
+little_time[between(Elo, 1000, 1900), `Elo level` := "Low rating"]
+little_time[between(Elo, 1901, 2400), `Elo level` := "High rating"]
+little_time[Elo >= 2401, `Elo level` := "GM rating"]
+little_time[, `Elo level` := factor(`Elo level`, levels = c("Below 1000 rating", "Low rating", "High rating", "GM rating"), ordered = T)]
+
+little_time[, `Moves with av. time` := Moves - `Moves with low time`]
+little_time[, `Bad moves with av. time` := `Bad moves` - `Bad moves with low time`]
+little_time[, `Bad moves percent with time` := `Bad moves with av. time` / `Moves with av. time`]
+little_time[, `Bad moves percent no time` := `Bad moves with low time` / `Moves with low time`]
+
+time_pressure_data = little_time[, .(`Time available` = mean(`Bad moves percent with time`, na.rm = T),
+                `Time pressure` = mean(`Bad moves percent no time`, na.rm = T)), by = .(Game_type, `Elo level`)]
+
+time_pressure_long = melt(time_pressure_data, id.vars = c("Game_type", "Elo level"))
+
+
+custom_theme_tp = list(   
+  scale_x_discrete(limits = c("Time available", "Time pressure"),  expand = expansion(mult = 0.3)),
+  scale_color_manual(values = rev(c("gold", "darkslategray1", "lightsalmon", "plum2"))),
+  theme(panel.border     = element_blank()),
+  theme(axis.title.y     = element_blank()),
+  theme(axis.text.y      = element_blank()),
+  theme(panel.grid.major.y = element_blank()),
+  theme(panel.grid.minor.y = element_blank()),
+  theme(axis.title.x     = element_blank()),
+  theme(panel.grid.major.x = element_blank()),
+  #theme(axis.text.x.top      = element_text(size=10)),
+  theme(axis.ticks       = element_blank()),
+  theme(plot.title       = element_text(size=14)),
+  theme(plot.subtitle    = element_text(size = 10)),
+  theme(strip.text = element_text(color = "black")),
+  theme(legend.position = "bottom")
+  )
+
+ggplot(time_pressure_long, aes(x = variable, y = value, group = `Elo level`)) +
+  geom_line(aes(color = `Elo level`), size = 1) +
+  facet_wrap(Game_type ~ .) +
+  geom_text_repel(data = time_pressure_long[variable == "Time available"], aes(label = round(value,2)), 
+             size = 3.5,
+             hjust = 1,
+             nudge_x = -0.05,
+             direction = "y") +
+  geom_text_repel(data = time_pressure_long[variable == "Time pressure"], aes(label = round(value,2)), 
+             size = 3.5,
+             hjust = 0,
+             #force = 0.5,
+             nudge_x = 0.05,
+             direction = "y") +
+  custom_theme_tp +
+  labs(
+    title = str_wrap("Errors per move with time available and under time pressure by rating and time control", 70)
+  )
+
+```
+
+There are some very interesting patterns in the charts:  
+1. For Elo ratings below 1,000 having more time leads to more mistakes! This is very surprising but it might have to do with players overthinking their moves (perhaps due to lack of opening knowledge)  
+2. For lower rated players (between 1000 and 1900 rating) time pressure does not affect them much (the low rating line is almost horizontal for all time controls)  
+3. Higher rated players tend to make more errors per move under time pressure compared to when they have time available
+
+## 4) Predicting the game outcome based on the available information
+
+How easy is it to predict the result of a chess match?  
+We can use the information that we have available in the dataset in order to answer that question. 
+The problem is a classification problem with 3 possible categories: Win for White (1-0), Draw (1/2-1/2) or Win for Black (0-1)
+
+For this analysis I will use a random forest with the [ranger](https://cran.r-project.org/web/packages/ranger/ranger.pdf) package. 
+The first iteration of the model will include the following variables:
+
+ * Starting time 
+ * Increment 
+ * Total moves
+ * ECO
+ * White ELO
+ * White blunders
+ * White mistakes
+ * White inaccuracies
+ * Black ELO
+ * Black blunders
+ * Black mistakes
+ * Black inaccuracies
+
+```{r predictions_accuracy, results='asis', fig.width = 10, echo = F}
+rf_plots <- function(model, testing) {
+  # Processing the confusion matrix
+  cm = confusionMatrix(predict(model, testing), testing$Result)
+  
+  cm_dt <- data.table(cm$table)
+  cm_dt[Prediction == Reference, fill:= F]
+  cm_dt[Prediction != Reference, fill:= T]
+  cm_dt[, Prediction := factor(Prediction, levels = c("1-0", "1/2-1/2", "0-1"))]
+  cm_dt[, Reference := factor(Reference, levels = c("1-0", "1/2-1/2", "0-1"))]
+  setnames(cm_dt, "Reference", "True value")
+  
+  cm_plot = ggplot(data = cm_dt, aes(x =  `True value` , y = Prediction, fill = factor(fill)))+
+                geom_tile() +
+                geom_text(aes(label = N)) +
+                scale_fill_manual(values = c("lightblue", "gray")) +
+                scale_x_discrete(position = "top", expand = expansion(mult = 0.01)) +
+                scale_y_discrete(expand = expansion(mult = 0.01)) +               
+                coord_fixed(ratio=1) +
+                guides(fill=FALSE) +                
+                theme(plot.margin=unit(c(0,0,0,0), "mm"))
+  
+  # Processing stats
+  stats_dt = t(round(cm$byClass, 2))[c("Balanced Accuracy", "Sensitivity", "Specificity", "Precision", "Recall"),]
+  
+  
+  imp = varImp(model)
+  imp_dt = data.table(Feature = rownames(imp$importance), Importance = imp$importance$Overall)
+  
+  imp_plot=ggplot(imp_dt, aes(x = reorder(Feature, Importance), y = Importance)) +
+                  geom_col(fill = "darkcyan") +
+                  coord_flip() +
+                  scale_y_continuous(expand = expansion(mult = 0.01)) +                  
+                  labs(x = NULL) +
+                  theme(panel.grid.major = element_blank(),
+                        panel.grid.minor = element_blank())
+  accuracy_grob = textGrob(paste("Overall accuracy of the model:", round(cm$overall["Accuracy"], 2)))
+  return(list(cm_plot, stats_dt, imp_plot, accuracy_grob))
+}
+
+set.seed(1)
+sample_chess = chess_data[sample(1:.N, 50000)]
+model_data = sample_chess[, .(BlackElo, Result, starting_time, increment, WhiteElo, 
+                              Total_moves, Black_blunders, Black_mistakes, Black_inaccuracies,
+                                       White_blunders, White_mistakes, White_inaccuracies, ECO)]
+model_data[, ECO_short := substr(ECO, 1, 1)]
+model_data[, ECO := NULL] #Shortening the opening information
+
+inTraining <- createDataPartition(model_data$Result, p = .75, list = FALSE)
+training <- model_data[ inTraining]
+testing  <- model_data[-inTraining]
+
+
+model <- train(Result ~ ., data = training, 
+               tuneLength = 5,
+               method = "ranger",
+               importance = 'impurity',
+               trControl = trainControl(
+                 method = "oob", 
+                 number = 5, 
+                 verboseIter = F))
+
+res_plots = rf_plots(model, testing)
+                                                                                                   
+lay = rbind(c(1,3,3),
+             c(2,3,3),
+             c(2,3,3),
+             c(2,3,3),
+             c(2,3,3))
+
+grid.arrange(res_plots[[4]], res_plots[[1]], res_plots[[3]], layout_matrix = lay, top = textGrob("Confusion matrix and feature importance", gp=gpar(fontsize=12,font=3)))
+kable(res_plots[[2]], caption = "Model statistics")
+```
+
+**Before trying to analyse the plots, let's first have a look at what is shown in them:**
+
+
+1. **Confusion matrix:** The confusion matrix (as the name very clearly suggests) is showing all the instances where the model is confusing one class for another. After consulting the table it becomes clearer on which areas of the dataset we need to focus more.  
+
+2. **Feature importance plot:** The interpretation of feature importance depends a lot on the algorithm that is used in the model. In our case we are using random forests.  
+*Random forests* are comprised of many decision trees (as forests typically are). The idea behind the algorithm is to reduce the variance of a single decision tree by adding some randomisation in the selection process. This is done in two ways:  
+*Method 1:* By randomly sampling with replacement from the training set   
+*Method 2:* By randomly selecting and restricting the available predictors for each split of the decision tree  
+After creating the collection of trees, the random forest makes predictions with a "voting system" from the individual decision trees. The most voted class is the one predicted. (In the case of ranger there are 500 decision trees used in the default settings)  
+The importance of each feature is assessed in the following manner:  
+On average (across all decision trees) when a split is made based on the selected feature, how good is that split?  
+And by how good what is meant is how homogeneous are the two datasets that result from the split. Coming back to chess, an example of a good split would be one where all the games on the one side of the split are wins for black and all the games on the other side of the split are draws.
+
+3. **Per class statistics:** While overall model statistics can be good enough to assess our model, by class statistics can give us a better overall understanding of the shortcomings of our predictions. For more details about each statistic have a look [here](https://en.wikipedia.org/wiki/Confusion_matrix).  
+
+Theory over! Let's have a look at the concrete output of our model.
+
+
+The output of our random forest is very interesting and can help us improve. The overall accuracy of the model is around 83% but this is not the end of the story.
+First of all, based on the confusion matrix and the statistics it becomes clear that our model does not predict draws well. One reason this might be the case is that draws are fairly uncommon in our dataset and we did not do anything to balance the 3 classes.  
+
+Another point to note from the feature importance plot is that the opening choice is not very helpful for splitting the game outcomes (which is to be expected otherwise some openings would become immensely popular) and therefore we can remove openings in the next iteration of the model.  
+
+The last parameter to consider is the inherent unpredictability in chess (especially online chess with fast time controls). There are various cases where mouseslips can occur, a player runs out of time or the more normal scenario where you make a single mistake in a winning game and all of a sudden you are lost.  
+
+We will try to address all these issues in the next iteration of our predictive model by doing the following:
+
+1. Introducing [SMOTE](https://machinelearningmastery.com/smote-oversampling-for-imbalanced-classification/) resampling in order to address the lack of drawn games  
+2. Removing the opening from the input to the model
+3. Introducing the moves in time scramble into the model. This should at least partially help the model figure out more cases where one player was running short of time.
+
+
+```{r predictions_updated, results='asis', fig.width = 10, echo = F}
+model_data = sample_chess[, .(BlackElo, Result, starting_time, increment, WhiteElo, Total_moves, 
+                              Black_blunders, Black_mistakes, Black_inaccuracies, Black_long_moves, Black_ts_moves,
+                              White_blunders, White_mistakes, White_inaccuracies, White_long_moves, White_ts_moves)]
+training <- model_data[ inTraining]
+testing  <- model_data[-inTraining]
+
+upd_model <- train(Result ~ ., data = training, 
+               tuneLength = 5,
+               method = "ranger",
+               importance = 'impurity',
+               trControl = trainControl(
+                 method = "oob", 
+                 number = 5, 
+                 verboseIter = F,
+                 sampling = "smote"))
+
+
+upd_res_plots = rf_plots(upd_model, testing)
+
+lay = rbind(c(1,3,3),
+             c(2,3,3),
+             c(2,3,3),
+             c(2,3,3),
+             c(2,3,3))
+grid.arrange(upd_res_plots[[4]], upd_res_plots[[1]], upd_res_plots[[3]], layout_matrix = lay, top = textGrob("Confusion matrix and feature importance", gp=gpar(fontsize=12,font=3)))
+kable(upd_res_plots[[2]], caption = "Model statistics")
+
+```
+
+
+**The results have changed significantly!**
+                       
+The model is much better at identifying drawn games, but this comes at a cost of the overall model accuracy. Depending on the aim of the model that might be desirable or not.  
+Furthermore, we have a second significant change in the feature importance category, the total number of moves is now first on the list.  
+This is a good indication that the total number of moves is most important when determining which games are drawn and because of our SMOTE "intervention" it is very high.
+                       
+## 5) Future considerations
+                       
+This was a very fun analysis and I believe there is still plenty more information in the dataset that I did not touch upon.   
+It might be interesting to analyse how effective is significant time investment in moves and whether it results in fewer mistakes.
+Or which openings result in the highest ELO rating increase for players, or simply make some analysis from a different perspective than mine!
+In terms of additions to the dataset, it might be very useful to know who made the last blunder in the game for prediction purposes. While this attribute is currently not in the dataset it
+can be added with a relatively small code change.  
+
+I hope you also found this analysis interesting and that you use the dataset for your own analysis!
