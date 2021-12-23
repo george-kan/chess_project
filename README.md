@@ -10,10 +10,10 @@ https://www.kaggle.com/noobiedatascientist/analysis-of-lichess-games?scriptVersi
 Some visuals from the notebook:
 
 Popularity of openings accross rating categories:  
-![pop_change-1](https://user-images.githubusercontent.com/56187121/147279240-93b948a1-93d5-446f-b875-431c0882b809.png)
+<img src="https://user-images.githubusercontent.com/56187121/147279240-93b948a1-93d5-446f-b875-431c0882b809.png" width = 560 height=400/>
 
 Number of times the balance of a game changes by rating and time control:  
-![game_flips-1](https://user-images.githubusercontent.com/56187121/147279315-fa1e9931-8557-4b6d-9be4-63f5bb9fd878.png)
+<img src="https://user-images.githubusercontent.com/56187121/147279315-fa1e9931-8557-4b6d-9be4-63f5bb9fd878.png" width = 560 height=400/>
 
 Errors per move by time availability and rating:  
-![ts_analysis-1](https://user-images.githubusercontent.com/56187121/147279386-f16467e4-5f67-4808-95a5-537d464bdaba.png)
+<img src="https://user-images.githubusercontent.com/56187121/147279386-f16467e4-5f67-4808-95a5-537d464bdaba.png" width = 560 height=400/>
